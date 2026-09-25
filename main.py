@@ -3,6 +3,7 @@ import logging
 import os
 import urllib.parse
 import threading
+import requests
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -27,7 +28,20 @@ CHANNEL_USERNAME = "@adityaservicesofficial"
 SUPPORT_LINK = f"tg://user?id={ADMIN_ID}"     
 ORDERS_FILE = "orders.json"
 
-# Flask Server for Render (To keep service alive)
+# LuvSMM Panel API Configuration
+SMM_API_URL = "https://luvsmm.com/api/v2"  
+SMM_API_KEY = "a2d676468376cdcc9cbc7ee5e0487af9"  # 👈 Aapki LuvSMM API key integrated hai[span_2](start_span)[span_2](end_span)
+
+# LuvSMM Panel Service IDs Mapping (Aapke bataye hue IDs)
+SERVICE_IDS = {
+    "views": 1137,               # Instagram Views ID[span_3](start_span)[span_3](end_span)
+    "likes": 173,                # Instagram Likes ID
+    "comments": 1517,            # Instagram Custom Comments ID
+    "followers_no_refill": 1300, # Instagram Followers (No Refill) ID
+    "followers_guarantee": 4038, # Instagram Followers (Lifetime Guarantee) ID
+}
+
+# Flask Server for Render (To keep service alive 24/7)
 app = Flask(__name__)
 
 @app.route('/')
@@ -161,16 +175,65 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.answer("❌ Aapne channel join nahi kiya hai!", show_alert=True)
             await query.edit_message_text(
-                "❌ **Verification Failed!**\n\nAapne abhi tak channel join nahi kiya hai. Niche button se join karke verify dabayein.",
+                "❌ **Verification Failed!**\nAapne abhi tak channel join nahi kiya hai. Niche button se join karke verify dabayein.",
                 parse_mode="Markdown",
                 reply_markup=get_force_join_keyboard()
             )
         return
 
+    # Admin Approval Handler via Inline Button (LuvSMM API Call)
+    if query.data.startswith("approve_"):
+        if user_id != ADMIN_ID:
+            await query.answer("❌ You are not authorized!", show_alert=True)
+            return
+        
+        idx = int(query.data.replace("approve_", ""))
+        orders = load_orders()
+        
+        if idx < len(orders):
+            ord_data = orders[idx]
+            service_key = ord_data.get("raw_service")
+            service_id = SERVICE_IDS.get(service_key)
+            link = ord_data.get("link")
+            qty = ord_data.get("quantity")
+
+            if not service_id:
+                await query.answer("❌ Service ID mapping not found!", show_alert=True)
+                return
+
+            # LuvSMM API Request Payload
+            payload = {
+                'key': SMM_API_KEY,
+                'action': 'add',
+                'service': service_id,
+                'link': link,
+                'quantity': qty
+            }
+
+            try:
+                response = requests.post(SMM_API_URL, data=payload).json()
+                if "order" in response:
+                    orders[idx]["status"] = "✅ Completed / Sent to SMM"
+                    with open(ORDERS_FILE, "w") as f:
+                        json.dump(orders, f, indent=4)
+                    
+                    smm_order_id = response.get("order")
+                    await query.edit_message_caption(
+                        caption=query.message.caption + f"\n\n🚀 **Status:** Approved & Sent to LuvSMM (Order ID: `{smm_order_id}`)",
+                        parse_mode="Markdown"
+                    )
+                    await query.answer("✅ Order successfully placed on LuvSMM Panel!")
+                else:
+                    error_msg = response.get("error", "Unknown error")
+                    await query.answer(f"❌ SMM Error: {error_msg}", show_alert=True)
+            except Exception as e:
+                await query.answer(f"❌ API Request Failed: {e}", show_alert=True)
+        return
+
     is_joined = await check_force_join(user_id, context)
     if not is_joined:
         await query.edit_message_text(
-            "⚠️ **Access Denied!**\n\nPlease join our official channel to continue using this bot.",
+            "⚠️ **Access Denied!**\nPlease join our official channel to continue using this bot.",
             parse_mode="Markdown",
             reply_markup=get_force_join_keyboard()
         )
@@ -346,8 +409,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     photo = update.message.photo[-1].file_id
 
-    # Service type aur subtype ko format karna
-    raw_service = context.user_data.get("selected_service", "Unknown Service")
+    raw_service = context.user_data.get("selected_service", "unknown_service")
     service_formatted = str(raw_service).replace('_', ' ').title()
     
     quantity = context.user_data.get("quantity", "N/A")
@@ -357,6 +419,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_info = {
         "user_id": user.id,
         "username": f"@{user.username}" if user.username else "No Username",
+        "raw_service": raw_service,
         "service": service_formatted,
         "quantity": quantity,
         "cost": cost,
@@ -365,6 +428,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     
     save_order(order_info)
+    orders = load_orders()
+    order_idx = len(orders) - 1
 
     admin_text = (
         f"🚨 **NEW PAYMENT RECEIVED!** 🚨\n\n"
@@ -375,10 +440,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔗 **Target Link:** `{order_info['link']}`"
     )
     
-    # Admin ko screenshot aur poori details bhejna
-    await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo, caption=admin_text, parse_mode="Markdown")
+    keyboard = [[InlineKeyboardButton("✅ Approve & Start Order", callback_data=f"approve_{order_idx}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Customer ko success message bhejna
+    await context.bot.send_photo(
+        chat_id=ADMIN_ID, 
+        photo=photo, 
+        caption=admin_text, 
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+
     await update.message.reply_text(
         "Thanks For Choosing Us , Your Order Will Be Completed Soon !\n\n"
         "Owner - @asoffcial",
@@ -409,12 +481,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ **Broadcast Completed!**\n\nSent: {sent}\nFailed: {failed}")
 
 def main():
-    # Start Flask server in a separate background thread
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
 
-    # Start Telegram Bot App
     app_bot = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -430,9 +500,9 @@ def main():
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    print("🚀 Aditya Services Bot is Running on Render 24/7...")
+    print("🚀 Aditya Services Bot with LuvSMM API is Running on Render 24/7...")
     app_bot.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-    
+            
