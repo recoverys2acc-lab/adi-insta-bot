@@ -1,0 +1,13 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Yeh ab har 5 minute mein automatic request bhejega
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pinging Render Web Service
+        run: curl -i https://adi-insta-bot.onrender.com
+        
